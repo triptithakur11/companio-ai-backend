@@ -6,6 +6,7 @@ const sql = require("mssql");
 const multer = require("multer");
 const upload = multer();
 const OpenAI = require("openai");
+const {translateText} = require("../services/translator");
 const openai = new OpenAI({
   apiKey: process.env.AZURE_OPEN_AI_KEY,
   baseURL: `${process.env.AZURE_OPEN_AI_ENDPOINT}/openai/deployments/${process.env.AZURE_OPEN_AI_DEPLOYMENT}`,
@@ -17,11 +18,11 @@ const openai = new OpenAI({
 const { BlobServiceClient } = require("@azure/storage-blob");
 
 const blobServiceClient = BlobServiceClient.fromConnectionString(
-  process.env.AZURE_STORAGE_CONNECTION_STRING
+  process.env.AZURE_STORAGE_CONNECTION_STRING,
 );
 
 const containerClient = blobServiceClient.getContainerClient(
-  process.env.AZURE_STORAGE_CONTAINER
+  process.env.AZURE_STORAGE_CONTAINER,
 );
 
 const {
@@ -84,8 +85,6 @@ ${rawText}
   return response.choices[0].message.content;
 }
 
-
-
 async function uploadToBlob(file) {
   const blobName = `${Date.now()}-${file.originalname}`;
 
@@ -93,46 +92,53 @@ async function uploadToBlob(file) {
 
   await blockBlobClient.uploadData(file.buffer, {
     blobHTTPHeaders: {
-      blobContentType: file.mimetype
-    }
+      blobContentType: file.mimetype,
+    },
   });
 
   return blockBlobClient.url;
 }
 
-router.post("/smart-notes", authMiddleware, upload.single("file"), async (req, res) => {
-  try {
-    const userId = req.user.id;
+router.post(
+  "/smart-notes",
+  authMiddleware,
+  upload.single("file"),
+  async (req, res) => {
+    try {
+      const userId = req.user.id;
 
-    if (!req.file)
-      return res.status(400).json({ error: "No file uploaded" });
+      const { targetLang } = req.body;
 
-    // 1️⃣ Upload to Blob
-    const blobUrl = await uploadToBlob(req.file);
+      if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-    // 2️⃣ Extract Text
-    const extractedText = await extractText(req.file.buffer);
+      // 1️⃣ Upload to Blob
+      const blobUrl = await uploadToBlob(req.file);
 
-    // 3️⃣ Create Chat with Agent 2
-    const chatResult = await sql.query`
+      // 2️⃣ Extract Text
+      const extractedText = await extractText(req.file.buffer);
+     // Translate Text
+      const translatedText = targetLang?await translateText(extractedText, targetLang):extractText;
+console.log(translatedText);
+      // 3️⃣ Create Chat with Agent 2
+      const chatResult = await sql.query`
       INSERT INTO Chats (userId, agentId, title, fileUrl, fileText)
       OUTPUT INSERTED.id
-      VALUES (${userId}, 6, ${req.file.originalname}, ${blobUrl}, ${extractedText})
+      VALUES (${userId}, 6, ${req.file.originalname}, ${blobUrl}, ${translatedText})
     `;
 
-    const chatId = chatResult.recordset[0].id;
+      const chatId = chatResult.recordset[0].id;
 
-    res.json({
-      message: "File uploaded successfully",
-      chatId,
-      blobUrl
-    });
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Upload failed" });
-  }
-});
+      res.json({
+        message: "File uploaded successfully",
+        chatId,
+        blobUrl,
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Upload failed" });
+    }
+  },
+);
 
 router.post("/extract-notes", upload.single("file"), async (req, res) => {
   try {

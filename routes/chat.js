@@ -114,17 +114,15 @@ ${chat.fileText}
       ORDER BY createdAt ASC
     `;
 
-    const messages = [
-      {
-        role: "system",
-        content: systemPrompt + "\n\n" + fileContext,
-      },
-      ...historyResult.recordset.map((m) => ({
-        role: m.role,
-        content: m.content,
-      })),
-    ];
+    const conversationText = `
+${systemPrompt}
 
+${fileContext}
+
+${historyResult.recordset
+  .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
+  .join("\n")}
+`;
     // 5️⃣ Get Azure Token
     const tokenResponse = await credential.getToken(
       "https://ai.azure.com/.default",
@@ -134,32 +132,20 @@ ${chat.fileText}
       return res.status(500).json({ error: "Failed to get Azure token" });
     }
 
-   
-
     // 6️⃣ Call Azure Foundry Agent
     const aiResponse = await axios.post(
-      agentId === 1
+      agentId === "1"
         ? process.env.AZURE_GOAL_AGENT_ENDPOINT
-        : agentId === 6
-          ? process.env.AZURE_SMART_NOTES_AGENT_ENDPOINT
-          : process.env.AZURE_SMART_NOTES_AGENT_ENDPOINT,
+        : agentId === "2"
+          ? process.env.AZURE_SMART_REV_AGENT_ENDPOINT
+          : agentId === "4"
+            ? process.env.AZURE_CURATED_RES_AGENT_ENDPOINT
+            : agentId === "6"
+              ? process.env.AZURE_SMART_NOTES_AGENT_ENDPOINT
+              : null,
 
       {
-         model: "gpt-4o",
-        input: messages.map((m) => ({
-          role: m.role,
-          content: [
-            {
-              type: "text",
-              text: m.content,
-            },
-          ],
-        })),
-        agent: {
-          type: "agent_reference",
-          name: agent.agentName,
-          version: agent.agentVersion,
-        },
+        input: conversationText,
       },
       {
         headers: {

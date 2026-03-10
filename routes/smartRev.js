@@ -11,14 +11,11 @@ const upload = multer({ storage: multer.memoryStorage() });
 router.post("/speech-to-text", upload.single("audio"), async (req, res) => {
   try {
     const audioBuffer = req.file.buffer;
-console.log("Audio size:", audioBuffer.length);
     const text = await speechToText(audioBuffer);
-console.log(text);
     res.json({
       success: true,
       text,
     });
-    
   } catch (error) {
     console.error(error);
     res.status(500).json({
@@ -30,9 +27,9 @@ console.log(text);
 
 router.post("/text-to-speech", async (req, res) => {
   try {
-    const { text } = req.body;
+    const { text, voice } = req.body;
 
-    const audioBuffer = await textToSpeech(text);
+    const audioBuffer = await textToSpeech(text, voice);
 
     res.set({
       "Content-Type": "audio/wav",

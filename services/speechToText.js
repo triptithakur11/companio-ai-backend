@@ -1,6 +1,10 @@
 const sdk = require("microsoft-cognitiveservices-speech-sdk");
+const fs = require("fs");
+const { convertToWav } = require("./convertToWav");
 
 async function speechToText(audioBuffer) {
+
+  const wavPath = await convertToWav(audioBuffer);
 
   return new Promise((resolve, reject) => {
 
@@ -11,38 +15,25 @@ async function speechToText(audioBuffer) {
 
     speechConfig.speechRecognitionLanguage = "en-US";
 
-    const pushStream = sdk.AudioInputStream.createPushStream();
+    const audioBufferWav = fs.readFileSync(wavPath);
 
-    pushStream.write(audioBuffer);
-    pushStream.close();
-
-    const audioConfig = sdk.AudioConfig.fromStreamInput(pushStream);
+    const audioConfig = sdk.AudioConfig.fromWavFileInput(audioBufferWav);
 
     const recognizer = new sdk.SpeechRecognizer(speechConfig, audioConfig);
 
     recognizer.recognizeOnceAsync(result => {
 
       if (result.reason === sdk.ResultReason.RecognizedSpeech) {
-
         resolve(result.text);
-
-      } else if (result.reason === sdk.ResultReason.NoMatch) {
-
-        reject("No speech recognized");
-
       } else {
-
-        reject(result.errorDetails);
-
+        resolve("");
       }
 
       recognizer.close();
 
     }, err => {
-
       recognizer.close();
       reject(err);
-
     });
 
   });

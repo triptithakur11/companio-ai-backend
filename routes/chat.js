@@ -10,6 +10,8 @@ require("dotenv").config();
 
 const router = express.Router();
 const multer = require("multer");
+const { checkSafety } = require("../services/checkContentSafety");
+const { speechToText } = require("../services/speechToText");
 
 const storage = multer.memoryStorage();
 
@@ -77,27 +79,52 @@ router.post("/create", authMiddleware, async (req, res) => {
   }
 });
 
-/* -------------------- SEND MESSAGE -------------------- */
-
 router.post(
   "/:chatId/:agentId/message",
   authMiddleware,
-  upload.single("file"),
+  upload.fields([
+    { name: "files", maxCount: 10 },
+    { name: "voice", maxCount: 1 },
+  ]),
   async (req, res) => {
     try {
       const { chatId, agentId } = req.params;
       const { message, targetLang } = req.body;
-      console.log(req.file);
-      console.log(req.body);
+
+      let filesUrls = [];
+      let voiceUrl = null;
       let extractedText = "";
 
-      if (req.file) {
-        extractedText = await extractText(req.file.buffer);
+      const files = req.files?.files || [];
+      const voice = req.files?.voice?.[0];
+
+      // Upload multiple files
+      for (const file of files) {
+        const url = await uploadToBlob(file, "notes");
+        filesUrls.push(url);
+        const text = await extractText(file.buffer);
+        extractedText += "\n" + text;
       }
 
-      if (!message && !req.file) {
-        return res.status(400).json({ error: "Message or file required" });
+      // Upload voice file
+      let voiceText = "";
+
+      if (voice) {
+        voiceUrl = await uploadToBlob(voice, "voice");
+        voiceText = await speechToText(voice.buffer);
       }
+
+      if (!message && files.length === 0 && !voice) {
+        return res
+          .status(400)
+          .json({ error: "Message, file or voice required" });
+      }
+
+      extractedText = extractedText
+        ? targetLang
+          ? await translateText(extractedText, targetLang)
+          : extractedText
+        : "";
 
       const translatedText = message
         ? targetLang
@@ -105,41 +132,37 @@ router.post(
           : message
         : "";
 
+      const finalText = extractedText + " " + translatedText + " " + voiceText;
+
+      const content = {
+        text: finalText || null,
+        files: filesUrls,
+        voice: voiceUrl,
+      };
+
+      // Save user message
       await sql.query`
         INSERT INTO Messages (chatId, role, content)
-        VALUES (${chatId}, 'user', ${translatedText || extractedText})
+        VALUES (${chatId}, 'user', ${JSON.stringify(content)})
       `;
 
-      const chatResult = await sql.query`
-      SELECT * FROM Chats WHERE id=${chatId}
-    `;
+      const safety = await checkSafety({
+        text: message,
+        file: files?.[0],
+        voice: voice,
+      });
 
-      if (chatResult.recordset.length === 0) {
-        return res.status(404).json({ error: "Chat not found" });
+      if (safety) {
+        const unsafe = safety.categoriesAnalysis?.some((c) => c.severity >= 2);
+
+        if (unsafe) {
+          return res.status(400).json({
+            error: "Content violates safety policy",
+          });
+        }
       }
 
-      const chat = chatResult.recordset[0];
-      const fileContext = chat.fileText
-        ? `
-The user uploaded the following academic document.
-Use this as primary source of truth.
-
-DOCUMENT:
----------
-${chat.fileText}
----------
-`
-        : "";
-      // 3️⃣ Get agent
-      const agentResult = await sql.query`
-      SELECT * FROM Agents WHERE id=${agentId}
-    `;
-
-      if (agentResult.recordset.length === 0) {
-        return res.status(404).json({ error: "Agent not found" });
-      }
-
-      const agent = agentResult.recordset[0];
+      // ---------- CHAT HISTORY ----------
       const historyResult = await sql.query`
         SELECT role, content
         FROM Messages
@@ -148,21 +171,25 @@ ${chat.fileText}
       `;
 
       const conversationText = `
-${systemPrompt}
+        ${systemPrompt}
+        ${historyResult.recordset
+          .map((m) => {
+            let parsed;
 
-${fileContext}
+            try {
+              parsed = JSON.parse(m.content);
+            } catch {
+              parsed = { text: m.content };
+            }
 
-${historyResult.recordset
-  .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
-  .join("\n")}
-`;
+            return `${m.role.toUpperCase()}: ${parsed.text || ""}`;
+          })
+          .join("\n")}
+        `;
 
       const tokenResponse = await credential.getToken(
         "https://ai.azure.com/.default",
       );
-      if (!tokenResponse?.token) {
-        return res.status(500).json({ error: "Failed to get Azure token" });
-      }
 
       const aiResponse = await axios.post(
         endpoints[agentId],
@@ -172,39 +199,72 @@ ${historyResult.recordset
             Authorization: `Bearer ${tokenResponse.token}`,
             "Content-Type": "application/json",
           },
+          responseType: "text",
+          transformResponse: [(data) => data],
         },
       );
 
-      const output = aiResponse.data?.output?.find(
-        (item) => item.type === "message",
-      );
+      let reply = "";
 
-      const reply = output?.content?.[0]?.text;
-      if (!reply) {
-        return res.status(500).json({ error: "No AI reply received" });
+      try {
+        const parsed = JSON.parse(aiResponse.data);
+        const output = parsed?.output?.find((item) => item.type === "message");
+        reply = output?.content?.[0]?.text;
+      } catch {
+        reply = aiResponse.data;
       }
+
+      // const voiceBuffer = await textToSpeech(reply);
+      // const aiVoiceFile = {
+      //   buffer: voiceBuffer,
+      //   originalname: `ai-${Date.now()}.wav`,
+      //   mimetype: "audio/wav",
+      // };
+
+      // const aiVoiceUrl = await uploadToBlob(aiVoiceFile, "voice");
+
+      const assistantContent = {
+        text: reply,
+        files: filesUrls,
+        voice: null,
+      };
+
       await sql.query`
         INSERT INTO Messages (chatId, role, content)
-        VALUES (${chatId}, 'assistant', ${reply})
+        VALUES (${chatId}, 'assistant', ${JSON.stringify(assistantContent)})
       `;
 
-      res.json({ reply });
+      res.json({
+        reply,
+        voiceUrl: null,
+        filesUrls,
+      });
     } catch (err) {
-      console.error("AZURE ERROR:", err.response?.data || err.message);
+      if (err.response) {
+        let errorMessage = err.response.data;
+
+        if (Buffer.isBuffer(errorMessage)) {
+          errorMessage = errorMessage.toString();
+        }
+
+        console.error("AZURE ERROR:", err.response.status, errorMessage);
+      } else {
+        console.error("SERVER ERROR:", err.message);
+      }
+
       res.status(500).json({ error: "Agent failed" });
     }
   },
 );
 
-module.exports = router;
 router.get("/:chatId/messages", authMiddleware, async (req, res) => {
   try {
     const userId = req.user.id;
     const { chatId } = req.params;
 
-    // Check if chat belongs to user
+    // Check chat ownership
     const chatCheck = await sql.query`
-      SELECT id FROM Chats 
+      SELECT id FROM Chats
       WHERE id = ${chatId} AND userId = ${userId}
     `;
 
@@ -212,15 +272,38 @@ router.get("/:chatId/messages", authMiddleware, async (req, res) => {
       return res.status(404).json({ error: "Chat not found" });
     }
 
-    // Fetch messages (only necessary fields)
-    const messages = await sql.query`
+    // Fetch messages
+    const result = await sql.query`
       SELECT role, content, createdAt
       FROM Messages
       WHERE chatId = ${chatId}
       ORDER BY createdAt ASC
     `;
 
-    res.json(messages.recordset);
+    const messages = result.recordset.map((msg) => {
+      let parsed;
+
+      try {
+        parsed = JSON.parse(msg.content);
+      } catch {
+        // fallback for old messages
+        parsed = {
+          text: msg.content,
+          voice: null,
+          file: [],
+        };
+      }
+
+      return {
+        role: msg.role,
+        text: parsed.text || null,
+        voice: parsed.voice || null,
+        files: parsed.files || [],
+        createdAt: msg.createdAt,
+      };
+    });
+
+    res.json(messages);
   } catch (error) {
     console.error("Fetch messages error:", error);
     res.status(500).json({ error: "Server error" });

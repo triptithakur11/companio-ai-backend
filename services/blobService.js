@@ -2,16 +2,18 @@ const { BlobServiceClient } = require("@azure/storage-blob");
 require("dotenv").config();
 
 const blobServiceClient = BlobServiceClient.fromConnectionString(
-  process.env.AZURE_STORAGE_CONNECTION_STRING
+  process.env.AZURE_STORAGE_CONNECTION_STRING,
 );
 
-const containerClient = blobServiceClient.getContainerClient(
-  process.env.AZURE_STORAGE_CONTAINER
-);
+async function uploadToBlob(file, containerName, blobPath) {
+  const containerClient = blobServiceClient.getContainerClient(containerName);
 
-async function uploadToBlob(file) {
+  // ensure container exists
+  await containerClient.createIfNotExists();
 
-  const blobName = `${Date.now()}-${file.originalname}`;
+  const safeName = file.originalname.replace(/\s+/g, "-");
+
+  const blobName = blobPath ? blobPath : `${Date.now()}-${safeName}`;
 
   const blockBlobClient = containerClient.getBlockBlobClient(blobName);
 
@@ -25,5 +27,5 @@ async function uploadToBlob(file) {
 }
 
 module.exports = {
-  uploadToBlob
+  uploadToBlob,
 };

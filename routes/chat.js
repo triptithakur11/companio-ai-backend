@@ -12,6 +12,7 @@ const router = express.Router();
 const multer = require("multer");
 const { checkSafety } = require("../services/checkContentSafety");
 const { speechToText } = require("../services/speechToText");
+const { textToSpeech } = require("../services/textToSpeech");
 
 const storage = multer.memoryStorage();
 
@@ -138,6 +139,7 @@ router.post(
         text: finalText || null,
         files: filesUrls,
         voice: voiceUrl,
+        hasText: message ? true : false,
       };
 
       // Save user message
@@ -161,12 +163,11 @@ router.post(
           });
         }
       }
-
+      // WHERE chatId=${chatId}
       // ---------- CHAT HISTORY ----------
       const historyResult = await sql.query`
         SELECT role, content
         FROM Messages
-        WHERE chatId=${chatId}
         ORDER BY createdAt ASC
       `;
 
@@ -214,19 +215,24 @@ router.post(
         reply = aiResponse.data;
       }
 
-      // const voiceBuffer = await textToSpeech(reply);
-      // const aiVoiceFile = {
-      //   buffer: voiceBuffer,
-      //   originalname: `ai-${Date.now()}.wav`,
-      //   mimetype: "audio/wav",
-      // };
+      const hasVoice = voiceUrl ? true : false;
+      let aiVoiceUrl = null;
+      if (hasVoice) {
+        const voiceBuffer = await textToSpeech(reply);
+        const aiVoiceFile = {
+          buffer: voiceBuffer,
+          originalname: `ai-${Date.now()}.wav`,
+          mimetype: "audio/wav",
+        };
 
-      // const aiVoiceUrl = await uploadToBlob(aiVoiceFile, "voice");
+        aiVoiceUrl = await uploadToBlob(aiVoiceFile, "voice");
+      }
 
       const assistantContent = {
         text: reply,
         files: filesUrls,
-        voice: null,
+        voice: aiVoiceUrl,
+        hasText: aiVoiceUrl ? false : true,
       };
 
       await sql.query`
@@ -236,8 +242,9 @@ router.post(
 
       res.json({
         reply,
-        voiceUrl: null,
+        voiceUrl: aiVoiceUrl,
         filesUrls,
+        hasText: aiVoiceUrl ? false : true,
       });
     } catch (err) {
       if (err.response) {
@@ -300,6 +307,7 @@ router.get("/:chatId/messages", authMiddleware, async (req, res) => {
         voice: parsed.voice || null,
         files: parsed.files || [],
         createdAt: msg.createdAt,
+        hasText: parsed.hasText || false,
       };
     });
 

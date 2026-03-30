@@ -1,17 +1,10 @@
 const express = require("express");
 const axios = require("axios");
 const sql = require("mssql");
-const { ClientSecretCredential } = require("@azure/identity");
 const authMiddleware = require("../middleware/auth");
 require("dotenv").config();
 
 const router = express.Router();
-
-const credential = new ClientSecretCredential(
-  process.env.AZURE_TENANT_ID,
-  process.env.AZURE_CLIENT_ID,
-  process.env.AZURE_CLIENT_SECRET,
-);
 
 router.post("/generate/:chatId", authMiddleware, async (req, res) => {
   try {
@@ -38,56 +31,72 @@ router.post("/generate/:chatId", authMiddleware, async (req, res) => {
       .join("\n");
 
     const prompt = `
-You are an AI task planner that converts conversations into actionable tasks.
-
-Your job is to analyze the conversation and extract practical tasks that help the user achieve their objective.
-
-Important rules:
-
-1. Ignore greetings, filler text, empty messages, voice placeholders, and irrelevant chat.
-2. Focus only on meaningful actions the user should perform.
-3. Break large goals into smaller actionable tasks.
-4. Each task should represent a clear action the user can execute.
-5. Avoid vague tasks like "improve skills" or "learn more".
-6. Prefer tasks such as: learn, practice, research, build, prepare, apply, schedule, review, etc.
-7. Tasks must be short and clear (5–12 words).
-8. Do not repeat similar tasks.
-9. Limit to a maximum of 10 tasks.
-10. Prioritize tasks that move the user closer to their objective.
-
-For each task include:
-- title (short actionable task)
-- priority (high | medium | low)
-- category (learning | practice | project | preparation | research)
-- isDone (always false)
-
-Return ONLY valid JSON in the exact format below.
-
-{
-  "goals": [
-    {
-      "title": "Task description",
-      "priority": "high",
-      "category": "learning",
-      "isDone": false
-    }
-  ]
-}
-
-Conversation:
-${chatText}
-`;
-
-    const tokenResponse = await credential.getToken(
-      "https://ai.azure.com/.default",
-    );
+      You are an expert AI productivity coach and task planner.
+      
+      Your job is to deeply analyze the conversation and extract ONLY high-quality, practical, and logical goals that directly help the user achieve their objective.
+      
+      STRICT RULES (VERY IMPORTANT):
+      
+      1. Identify the USER'S CORE OBJECTIVE first (ignore assistant replies unless needed for clarity).
+      2. Generate goals ONLY if they clearly contribute toward that objective.
+      3. NEVER generate generic, vague, or filler tasks.
+         ❌ Bad: "Improve skills", "Learn more", "Work hard"
+         ✅ Good: "Solve 5 binary search problems on LeetCode"
+      
+      4. Each goal MUST:
+         - Be realistic and actionable
+         - Represent a clear real-world step
+         - Be specific enough that user knows exactly what to do
+         - Be outcome-driven (not abstract intention)
+      
+      5. Break large goals into meaningful smaller steps ONLY if necessary.
+      6. Do NOT create unnecessary or redundant goals.
+      7. Avoid repeating similar tasks in different wording.
+      8. Max 8–10 goals ONLY (quality over quantity).
+      9. Ignore greetings, filler text, empty messages, or noise.
+      10. If conversation lacks clarity → generate only highly confident goals.
+      
+      PRIORITY RULES:
+      - high → critical steps that directly move user forward
+      - medium → supportive but important steps
+      - low → optional or secondary improvements
+      
+      CATEGORY RULES:
+      - learning → studying concepts
+      - practice → solving problems / exercises
+      - project → building something
+      - preparation → planning, resume, interviews, applications
+      - research → exploring options, comparing, gathering info
+      
+      OUTPUT RULES:
+      - Titles MUST be 5–12 words
+      - Use strong action verbs (build, solve, implement, revise, apply, etc.)
+      - Keep language simple and direct
+      - No extra explanation, ONLY JSON
+      
+      Return strictly in this format:
+      
+      {
+        "goals": [
+          {
+            "title": "Clear actionable task",
+            "priority": "high",
+            "category": "practice",
+            "isDone": false
+          }
+        ]
+      }
+      
+      Conversation:
+      ${chatText}
+      `;
 
     const aiResponse = await axios.post(
       process.env.AZURE_GOAL_AGENT_ENDPOINT,
       { input: prompt },
       {
         headers: {
-          Authorization: `Bearer ${tokenResponse.token}`,
+          "api-key": process.env.AZURE_AGENT_KEY,
           "Content-Type": "application/json",
         },
         responseType: "text",

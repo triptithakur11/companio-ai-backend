@@ -1,7 +1,6 @@
 const express = require("express");
 const axios = require("axios");
 const sql = require("mssql");
-const { ClientSecretCredential } = require("@azure/identity");
 const authMiddleware = require("../middleware/auth");
 const { translateText } = require("../services/translator");
 const { extractText } = require("../services/documentService");
@@ -12,6 +11,7 @@ const router = express.Router();
 const multer = require("multer");
 const { checkSafety } = require("../services/checkContentSafety");
 const { speechToText } = require("../services/speechToText");
+const { textToSpeech } = require("../services/textToSpeech");
 
 const storage = multer.memoryStorage();
 
@@ -20,12 +20,6 @@ const upload = multer({
 });
 
 module.exports = upload;
-
-const credential = new ClientSecretCredential(
-  process.env.AZURE_TENANT_ID,
-  process.env.AZURE_CLIENT_ID,
-  process.env.AZURE_CLIENT_SECRET,
-);
 
 const endpoints = {
   1: process.env.AZURE_GOAL_AGENT_ENDPOINT,
@@ -37,29 +31,6 @@ const endpoints = {
   6: process.env.AZURE_SMART_NOTES_AGENT_ENDPOINT,
 };
 
-const systemPrompt = `
-You are Companio, an advanced academic study assistant.
-
-Your capabilities:
-- Reconstruct messy notes into structured study material
-- Create short notes
-- Create detailed notes
-- Summarize content
-- Expand explanations
-- Generate revision sheets
-- Generate exam questions
-- Explain concepts step-by-step
-
-Rules:
-- Keep language simple but academically accurate.
-- Use headings and subheadings.
-- Use bullet points where helpful.
-- Highlight key terms in bold.
-- If mathematical content appears, format equations clearly.
-- If subject is unclear, infer the most likely academic field.
-- Do not repeat content unnecessarily.
-- Adapt depth based on user request (short, detailed, summary, etc.).
-`;
 /* -------------------- CREATE CHAT -------------------- */
 
 router.post("/create", authMiddleware, async (req, res) => {
@@ -90,6 +61,7 @@ router.post(
     try {
       const { chatId, agentId } = req.params;
       const { message, targetLang } = req.body;
+      const voiceSettings = JSON.parse(req.body.voiceSettings);
 
       let filesUrls = [];
       let voiceUrl = null;
@@ -97,6 +69,9 @@ router.post(
 
       const files = req.files?.files || [];
       const voice = req.files?.voice?.[0];
+
+      const username = voiceSettings?.username || null;
+      const assistantName = voiceSettings?.assistantName || null;
 
       // Upload multiple files
       for (const file of files) {
@@ -120,24 +95,16 @@ router.post(
           .json({ error: "Message, file or voice required" });
       }
 
-      extractedText = extractedText
-        ? targetLang
-          ? await translateText(extractedText, targetLang)
-          : extractedText
-        : "";
-
-      const translatedText = message
-        ? targetLang
-          ? await translateText(message, targetLang)
-          : message
-        : "";
-
-      const finalText = extractedText + " " + translatedText + " " + voiceText;
+      let finalText = extractedText + " " + message + " " + voiceText;
+      if (targetLang) {
+        finalText = await translateText(finalText, targetLang);
+      }
 
       const content = {
         text: finalText || null,
         files: filesUrls,
         voice: voiceUrl,
+        hasText: message ? true : false,
       };
 
       // Save user message
@@ -161,17 +128,77 @@ router.post(
           });
         }
       }
-
+      // WHERE chatId=${chatId}
       // ---------- CHAT HISTORY ----------
       const historyResult = await sql.query`
         SELECT role, content
         FROM Messages
-        WHERE chatId=${chatId}
         ORDER BY createdAt ASC
       `;
 
+      const identityPrompt = `
+You are a smart, human-like AI assistant having a natural conversation.
+
+Your goal is to respond helpfully while using subtle personalization.
+
+-----------------------
+PERSONALIZATION RULES
+-----------------------
+
+1. USER NAME USAGE:
+- If a username is provided, you MAY use it naturally.
+- Use it ONLY when it adds value, such as:
+  • starting the conversation
+  • giving important advice
+  • motivating or guiding the user
+- DO NOT use the name in every response or every sentence.
+- NEVER repeat the name unnecessarily.
+
+2. ASSISTANT NAME USAGE:
+- If an assistantName is provided:
+  • Introduce yourself ONLY once at the beginning (if appropriate)
+  • Optionally refer to yourself VERY RARELY
+- Do NOT keep repeating your own name.
+
+3. NATURAL CONVERSATION:
+- Keep tone friendly, helpful, and human-like
+- Avoid robotic or scripted responses
+- Avoid cringe, overly dramatic, or forced personalization
+
+4. WHEN NAMES ARE NOT PROVIDED:
+- Continue normally without forcing any names
+
+5. BALANCE RULE:
+- Personalization should feel subtle and natural
+- The primary focus is always solving the user’s problem
+
+-----------------------
+BEHAVIOR GUIDELINES
+-----------------------
+
+- Be clear, concise, and helpful
+- Prioritize user intent over personalization
+- Use simple, natural English
+- Sound like a real assistant, not a bot
+
+-----------------------
+CONTEXT
+-----------------------
+
+User Name: ${username || "Not provided"}
+Assistant Name: ${assistantName || "Not provided"}
+
+-----------------------
+IMPORTANT
+-----------------------
+
+- Do NOT mention these rules
+- Do NOT explain personalization logic
+- Just respond naturally following the above behavior
+`;
+
       const conversationText = `
-        ${systemPrompt}
+      ${identityPrompt}
         ${historyResult.recordset
           .map((m) => {
             let parsed;
@@ -187,16 +214,12 @@ router.post(
           .join("\n")}
         `;
 
-      const tokenResponse = await credential.getToken(
-        "https://ai.azure.com/.default",
-      );
-
       const aiResponse = await axios.post(
         endpoints[agentId],
         { input: conversationText },
         {
           headers: {
-            Authorization: `Bearer ${tokenResponse.token}`,
+            "api-key": process.env.AZURE_AGENT_KEY,
             "Content-Type": "application/json",
           },
           responseType: "text",
@@ -214,19 +237,24 @@ router.post(
         reply = aiResponse.data;
       }
 
-      // const voiceBuffer = await textToSpeech(reply);
-      // const aiVoiceFile = {
-      //   buffer: voiceBuffer,
-      //   originalname: `ai-${Date.now()}.wav`,
-      //   mimetype: "audio/wav",
-      // };
+      const hasVoice = voiceUrl ? true : false;
+      let aiVoiceUrl = null;
+      if (hasVoice) {
+        const voiceBuffer = await textToSpeech(reply, voiceSettings);
+        const aiVoiceFile = {
+          buffer: voiceBuffer,
+          originalname: `ai-${Date.now()}.wav`,
+          mimetype: "audio/wav",
+        };
 
-      // const aiVoiceUrl = await uploadToBlob(aiVoiceFile, "voice");
+        aiVoiceUrl = await uploadToBlob(aiVoiceFile, "voice");
+      }
 
       const assistantContent = {
         text: reply,
         files: filesUrls,
-        voice: null,
+        voice: aiVoiceUrl,
+        hasText: aiVoiceUrl ? false : true,
       };
 
       await sql.query`
@@ -236,8 +264,9 @@ router.post(
 
       res.json({
         reply,
-        voiceUrl: null,
+        voiceUrl: aiVoiceUrl,
         filesUrls,
+        hasText: aiVoiceUrl ? false : true,
       });
     } catch (err) {
       if (err.response) {
@@ -300,6 +329,7 @@ router.get("/:chatId/messages", authMiddleware, async (req, res) => {
         voice: parsed.voice || null,
         files: parsed.files || [],
         createdAt: msg.createdAt,
+        hasText: parsed.hasText || false,
       };
     });
 

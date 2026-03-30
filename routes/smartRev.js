@@ -27,9 +27,9 @@ router.post("/speech-to-text", upload.single("audio"), async (req, res) => {
 
 router.post("/text-to-speech", async (req, res) => {
   try {
-    const { text, voice } = req.body;
+    const { text, voiceSettings } = req.body;
 
-    const audioBuffer = await textToSpeech(text, voice);
+    const audioBuffer = await textToSpeech(text, voiceSettings);
 
     res.set({
       "Content-Type": "audio/wav",
